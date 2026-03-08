@@ -56,6 +56,9 @@ class Surgery:
         self.chunksize = chunksize
         self.segments = []
         self.wavetable_data = []
+        self.average_frequency = None
+        self.note = None
+        self.target_midi_note = None
 
     def set_split_dir(self, split_dir):
         n = 0
@@ -161,6 +164,44 @@ class Surgery:
             f.write(surge_chunk)
             f.write(raw_wav_data[20 + fmt_chunk_lenght:])
 
+    def pitch_detect(self):
+        fundam_freqs = librosa.yin(self.audio_data, fmin=80, fmax=1000)
+        valid_fundam_freqs = fundam_freqs[fundam_freqs > 0]
+        if len(valid_fundam_freqs) == 0:
+            print("Fundamental frequency not found")
+            self.average_frequency = 0
+        self.average_frequency = np.median(valid_fundam_freqs)
+
+    def frequency_to_note(self):
+        if not self.average_frequency:
+            self.pitch_detect()
+        elif self.average_frequency <= 0:
+            print('Cannot find average frequency. Pitch detection impossible')
+
+        notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        note_number = int(12 * np.log2(self.average_frequency / 440.0) + 69)
+        octave = (note_number // 12) - 1
+        note_index = note_number % 12
+        self.note =  f"{notes[note_index]}{octave}"
+
+    def set_target_midi_note(self, target_note):
+        try:
+            self.target_midi_note = librosa.note_to_midi(target_note)
+        except librosa.util.exceptions.ParameterError as e:
+            raise SurgeryException(e)
+
+    def transpose_to_note(self):
+        if not self.target_midi_note:
+            print('Target midi note not set. Please set target midi note first')
+            return
+        if not self.average_frequency:
+            self.pitch_detect()
+        if self.average_frequency <= 0:
+            print('Cannot find average frequency. Pitch shifting impossible')
+        current_midi_note = int(np.round(librosa.hz_to_midi(self.average_frequency)))
+        n_steps = self.target_midi_note - current_midi_note
+        self.audio_data = librosa.effects.pitch_shift(self.audio_data, sr=self.sample_rate, n_steps=n_steps)
+
     def surge(self):
         self.wavetable_data = np.concatenate(self.segments[self.offset:self.offset+self.nb_segments])
         if self.outfile_path.suffix == ".wt":
@@ -172,6 +213,11 @@ class Surgery:
 def analyze(surgeon):
      print(f'Number of channel in wavefile: {surgeon.number_channel}')
      print(f'Sample rate: {surgeon.sample_rate}')
+     surgeon.pitch_detect()
+     if surgeon.average_frequency:
+        surgeon.frequency_to_note()
+        print(f'Avergage frequency: {surgeon.average_frequency} ({surgeon.note})')
+
      print('Searching for Wavetable segments candidates')
      surgeon.find_segments()
      print(f'Wavetable segments found: {len(surgeon.segments)}')
@@ -183,6 +229,13 @@ def split(surgeon, args):
 
 def surge(surgeon, args):
     surgeon.set_outfile_path(args.wavetable_file)
+    if args.transpose:
+        try:
+            surgeon.set_target_midi_note(args.transpose)
+        except SurgeryException as e:
+            print(f'Invalid target midi note {args.transpose} ({e})')
+            sys.exit(1)
+        surgeon.transpose_to_note()
     surgeon.find_segments()
     surgeon.surge()
 
@@ -222,6 +275,7 @@ if __name__ == '__main__':
 
     surge_parser = subparsers.add_parser('surge', help='Create a Surge XT wavetable wt file')
     surge_parser.add_argument('wavetable_file', type=Path, help='Wavetable file path')
+    surge_parser.add_argument('--transpose', '-t', type=str, help='Try to transpose to specified note before surgery. E.g.: F#1')
 
     split_parser = subparsers.add_parser('split', help='Split wav file into multiple wav files with wavetable segments')
     split_parser.add_argument('outdir', type=Path, help='Directory where to put segment files (default: wavefile basen ame)')
